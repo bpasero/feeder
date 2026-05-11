@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import DOMPurify from 'dompurify';
 import { api, type Feed, type Item, type ReaderArticle } from './api';
 import { ContextMenu, type MenuEntry } from './ContextMenu';
@@ -87,7 +87,10 @@ export function App() {
   const [selection, setSelection] = useState<Selection>({ kind: 'all' });
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [activeItemId, setActiveItemId] = useState<number | null>(null);
+  const [openTabs, setOpenTabs] = useState<Item[]>([]);
   const [addUrl, setAddUrl] = useState('');
+  const [addOpen, setAddOpen] = useState(false);
+  const addInputRef = useRef<HTMLInputElement | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [readerArticles, setReaderArticles] = useState<Record<number, ReaderArticle>>({});
@@ -97,11 +100,23 @@ export function App() {
     const stored = localStorage.getItem('readerPaneVisible');
     return stored === null ? true : stored === '1';
   });
+  const [showOriginal, setShowOriginal] = useState<boolean>(() => localStorage.getItem('showOriginal') === '1');
+  const [gridMode, setGridMode] = useState<boolean>(() => localStorage.getItem('gridMode') === '1');
+  const [dragId, setDragId] = useState<number | null>(null);
+  const [dropTargetId, setDropTargetId] = useState<number | null>(null);
   const [menu, setMenu] = useState<{ entries: MenuEntry[]; x: number; y: number } | null>(null);
 
   useEffect(() => {
     localStorage.setItem('readerPaneVisible', readerPaneVisible ? '1' : '0');
   }, [readerPaneVisible]);
+
+  useEffect(() => {
+    localStorage.setItem('showOriginal', showOriginal ? '1' : '0');
+  }, [showOriginal]);
+
+  useEffect(() => {
+    localStorage.setItem('gridMode', gridMode ? '1' : '0');
+  }, [gridMode]);
 
   const loadFeeds = useCallback(async () => {
     try {
@@ -140,7 +155,10 @@ export function App() {
     }
   }, [selection, unreadOnly]);
 
-  const activeItem = useMemo(() => items.find((i) => i.id === activeItemId) ?? null, [items, activeItemId]);
+  const activeItem = useMemo(
+    () => openTabs.find((t) => t.id === activeItemId) ?? items.find((i) => i.id === activeItemId) ?? null,
+    [openTabs, items, activeItemId]
+  );
   const activeReader = activeItem ? readerArticles[activeItem.id] : undefined;
   const activeReaderError = activeItem ? readerErrors[activeItem.id] : undefined;
   const isReaderLoading = activeItem !== null && readerLoadingId === activeItem.id && !activeReader;
@@ -187,6 +205,7 @@ export function App() {
     try {
       await api.addFeed(addUrl.trim());
       setAddUrl('');
+      setAddOpen(false);
       await loadFeeds();
       await reloadItems();
     } catch (e) {
@@ -195,6 +214,15 @@ export function App() {
       setBusy(false);
     }
   }
+
+  function closeAdd() {
+    setAddOpen(false);
+    setAddUrl('');
+  }
+
+  useEffect(() => {
+    if (addOpen) addInputRef.current?.focus();
+  }, [addOpen]);
 
   async function handleRefreshAll() {
     if (busy) return;
@@ -216,6 +244,11 @@ export function App() {
     try {
       await api.deleteFeed(id);
       if (selection.kind === 'feed' && selection.id === id) setSelection({ kind: 'all' });
+      const remaining = openTabs.filter((t) => t.feed_id !== id);
+      setOpenTabs(remaining);
+      if (activeItemId !== null && !remaining.some((t) => t.id === activeItemId)) {
+        setActiveItemId(remaining[0]?.id ?? null);
+      }
       await loadFeeds();
       await reloadItems();
     } catch (e) {
@@ -225,10 +258,13 @@ export function App() {
 
   async function handleOpenItem(item: Item) {
     setActiveItemId(item.id);
+    setOpenTabs((prev) => (prev.some((t) => t.id === item.id) ? prev : [...prev, item]));
     if (!item.read) {
       try {
         await api.setItemRead(item.id, true);
-        setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, read: 1 } : i)));
+        const mark = (i: Item) => (i.id === item.id ? { ...i, read: 1 } : i);
+        setItems((prev) => prev.map(mark));
+        setOpenTabs((prev) => prev.map(mark));
         loadFeeds();
       } catch (e) {
         setError((e as Error).message);
@@ -240,7 +276,9 @@ export function App() {
     const next = item.read ? false : true;
     try {
       await api.setItemRead(item.id, next);
-      setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, read: next ? 1 : 0 } : i)));
+      const mark = (i: Item) => (i.id === item.id ? { ...i, read: next ? 1 : 0 } : i);
+      setItems((prev) => prev.map(mark));
+      setOpenTabs((prev) => prev.map(mark));
       loadFeeds();
     } catch (e) {
       setError((e as Error).message);
@@ -251,11 +289,64 @@ export function App() {
     const feedId = selection.kind === 'feed' ? selection.id : undefined;
     try {
       await api.markAllRead(feedId);
+      setOpenTabs((prev) =>
+        prev.map((t) => (feedId === undefined || t.feed_id === feedId ? { ...t, read: 1 } : t))
+      );
       await loadFeeds();
       await reloadItems();
     } catch (e) {
       setError((e as Error).message);
     }
+  }
+
+  function reorderTab(fromId: number, toId: number) {
+    if (fromId === toId) return;
+    setOpenTabs((prev) => {
+      const fromIdx = prev.findIndex((t) => t.id === fromId);
+      const toIdx = prev.findIndex((t) => t.id === toId);
+      if (fromIdx === -1 || toIdx === -1) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, moved!);
+      return next;
+    });
+  }
+
+  useEffect(() => {
+    if (!gridMode || !readerPaneVisible) return;
+    let cancelled = false;
+    for (const t of openTabs) {
+      if (!safeHref(t.url)) continue;
+      if (readerArticles[t.id] || readerErrors[t.id]) continue;
+      api
+        .getReaderArticle(t.id)
+        .then((article) => {
+          if (cancelled) return;
+          setReaderArticles((prev) => ({ ...prev, [t.id]: article }));
+        })
+        .catch((e: Error) => {
+          if (cancelled) return;
+          setReaderErrors((prev) => ({ ...prev, [t.id]: e.message }));
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+    // intentionally not depending on readerArticles/readerErrors to avoid loops
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gridMode, readerPaneVisible, openTabs]);
+
+  function closeTab(id: number) {
+    setOpenTabs((prev) => {
+      const idx = prev.findIndex((t) => t.id === id);
+      if (idx === -1) return prev;
+      const next = prev.filter((t) => t.id !== id);
+      if (id === activeItemId) {
+        const fallback = next[idx] ?? next[idx - 1] ?? null;
+        setActiveItemId(fallback ? fallback.id : null);
+      }
+      return next;
+    });
   }
 
   const totalUnread = feeds.reduce((acc, f) => acc + f.unread_count, 0);
@@ -282,6 +373,7 @@ export function App() {
         onClick: async () => {
           try {
             await api.markAllRead();
+            setOpenTabs((prev) => prev.map((t) => ({ ...t, read: 1 })));
             await loadFeeds();
             await reloadItems();
           } catch (e) {
@@ -316,6 +408,7 @@ export function App() {
         onClick: async () => {
           try {
             await api.markAllRead(f.id);
+            setOpenTabs((prev) => prev.map((t) => (t.feed_id === f.id ? { ...t, read: 1 } : t)));
             await loadFeeds();
             await reloadItems();
           } catch (e) {
@@ -391,16 +484,6 @@ export function App() {
     <div className="app">
       <header className="topbar">
         <h1>Feed Reader</h1>
-        <form onSubmit={handleAddFeed} className="add-form">
-          <input
-            type="url"
-            placeholder="https://example.com/feed.xml"
-            value={addUrl}
-            onChange={(e) => setAddUrl(e.target.value)}
-            disabled={busy}
-          />
-          <button type="submit" disabled={busy || !addUrl.trim()}>Add</button>
-        </form>
         <button onClick={handleRefreshAll} disabled={busy}>Refresh all</button>
         <label className="unread-toggle">
           <input type="checkbox" checked={unreadOnly} onChange={(e) => setUnreadOnly(e.target.checked)} />
@@ -424,6 +507,41 @@ export function App() {
 
       <div className={`body ${readerPaneVisible ? '' : 'no-reader'}`}>
         <aside className="sidebar">
+          <div className="sidebar-header">
+            <span className="sidebar-heading">Feeds</span>
+            <button
+              type="button"
+              className={`sidebar-add ${addOpen ? 'on' : ''}`}
+              onClick={() => (addOpen ? closeAdd() : setAddOpen(true))}
+              aria-label={addOpen ? 'Cancel add feed' : 'Add feed'}
+              aria-expanded={addOpen}
+              title={addOpen ? 'Cancel' : 'Add feed'}
+            >
+              {addOpen ? (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M18 6L6 18M6 6l12 12" />
+                </svg>
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+              )}
+            </button>
+          </div>
+          {addOpen && (
+            <form className="sidebar-add-form" onSubmit={handleAddFeed}>
+              <input
+                ref={addInputRef}
+                type="url"
+                placeholder="https://example.com/feed.xml"
+                value={addUrl}
+                onChange={(e) => setAddUrl(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Escape') closeAdd(); }}
+                disabled={busy}
+              />
+              <button type="submit" disabled={busy || !addUrl.trim()}>Add</button>
+            </form>
+          )}
           <div
             className={`feed-item ${selection.kind === 'all' ? 'active' : ''}`}
             onClick={() => setSelection({ kind: 'all' })}
@@ -496,11 +614,107 @@ export function App() {
 
         {readerPaneVisible && (
           <section className="reader" aria-label="Article reader">
+            {openTabs.length > 0 && !gridMode && (
+              <div className="reader-tabs" role="tablist" aria-label="Open articles">
+                {openTabs.map((t) => (
+                  <div
+                    key={t.id}
+                    role="tab"
+                    aria-selected={t.id === activeItemId}
+                    tabIndex={t.id === activeItemId ? 0 : -1}
+                    className={`reader-tab ${t.id === activeItemId ? 'active' : ''} ${dragId === t.id ? 'dragging' : ''} ${dropTargetId === t.id && dragId !== null && dragId !== t.id ? 'drop-target' : ''}`}
+                    draggable
+                    onDragStart={(e) => {
+                      setDragId(t.id);
+                      e.dataTransfer.effectAllowed = 'move';
+                      e.dataTransfer.setData('text/plain', String(t.id));
+                    }}
+                    onDragOver={(e) => {
+                      if (dragId === null || dragId === t.id) return;
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = 'move';
+                      if (dropTargetId !== t.id) setDropTargetId(t.id);
+                    }}
+                    onDragLeave={() => {
+                      if (dropTargetId === t.id) setDropTargetId(null);
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      if (dragId !== null) reorderTab(dragId, t.id);
+                      setDragId(null);
+                      setDropTargetId(null);
+                    }}
+                    onDragEnd={() => {
+                      setDragId(null);
+                      setDropTargetId(null);
+                    }}
+                    onClick={() => setActiveItemId(t.id)}
+                    onAuxClick={(e) => {
+                      if (e.button === 1) {
+                        e.preventDefault();
+                        closeTab(t.id);
+                      }
+                    }}
+                    title={t.title ?? '(untitled)'}
+                  >
+                    <span className="reader-tab-title">{t.title ?? '(untitled)'}</span>
+                    <button
+                      type="button"
+                      draggable={false}
+                      className="reader-tab-close"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        closeTab(t.id);
+                      }}
+                      aria-label="Close tab"
+                      title="Close tab"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M18 6L6 18M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
             <header className="reader-pane-header">
               <div className="reader-pane-context" title={activeItem?.feed_url}>
                 {activeItem ? (activeItem.feed_title ?? activeItem.feed_url) : 'Reader'}
               </div>
               <div className="reader-pane-actions">
+                {activeItem && activeHref && (
+                  <div className="reader-mode-toggle" role="group" aria-label="Reader mode">
+                    <button
+                      type="button"
+                      className={!showOriginal ? 'on' : ''}
+                      onClick={() => setShowOriginal(false)}
+                      aria-pressed={!showOriginal}
+                      title="Reader view"
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                        <polyline points="14 2 14 8 20 8" />
+                        <line x1="8" y1="13" x2="16" y2="13" />
+                        <line x1="8" y1="17" x2="14" y2="17" />
+                      </svg>
+                      Reader
+                    </button>
+                    <button
+                      type="button"
+                      className={showOriginal ? 'on' : ''}
+                      onClick={() => setShowOriginal(true)}
+                      aria-pressed={showOriginal}
+                      title="Original page"
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <circle cx="12" cy="12" r="10" />
+                        <line x1="2" y1="12" x2="22" y2="12" />
+                        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+                      </svg>
+                      Original
+                    </button>
+                  </div>
+                )}
                 {activeItem && (
                   <button onClick={() => handleToggleRead(activeItem)}>
                     Mark as {activeItem.read ? 'unread' : 'read'}
@@ -519,6 +733,22 @@ export function App() {
                     </svg>
                   </a>
                 )}
+                {openTabs.length > 1 && (
+                  <button
+                    className={`pane-toggle ${gridMode ? 'on' : ''}`}
+                    onClick={() => setGridMode((v) => !v)}
+                    title={gridMode ? 'Single tab view' : 'Grid view'}
+                    aria-label={gridMode ? 'Single tab view' : 'Grid view'}
+                    aria-pressed={gridMode}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <rect x="3" y="3" width="8" height="8" rx="1" />
+                      <rect x="13" y="3" width="8" height="8" rx="1" />
+                      <rect x="3" y="13" width="8" height="8" rx="1" />
+                      <rect x="13" y="13" width="8" height="8" rx="1" />
+                    </svg>
+                  </button>
+                )}
                 <button
                   className="reader-pane-close"
                   onClick={() => setReaderPaneVisible(false)}
@@ -531,8 +761,128 @@ export function App() {
                 </button>
               </div>
             </header>
-            <div className="reader-pane-scroll">
-              {activeItem ? (
+            {gridMode && openTabs.length > 0 ? (
+              <div className="reader-grid">
+                {openTabs.map((t) => {
+                  const tHref = safeHref(t.url);
+                  const cached = readerArticles[t.id];
+                  const tileRaw = cached?.content ?? t.content ?? t.summary ?? '<em>No content.</em>';
+                  const tileHtml = DOMPurify.sanitize(tileRaw, { ADD_ATTR: ['target', 'rel'] });
+                  const tileLoading = readerLoadingId === t.id && !cached;
+                  return (
+                    <div
+                      key={t.id}
+                      className={`reader-tile ${t.id === activeItemId ? 'active' : ''} ${dragId === t.id ? 'dragging' : ''} ${dropTargetId === t.id && dragId !== null && dragId !== t.id ? 'drop-target' : ''}`}
+                      onClick={() => setActiveItemId(t.id)}
+                      onDragOver={(e) => {
+                        if (dragId === null || dragId === t.id) return;
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = 'move';
+                        if (dropTargetId !== t.id) setDropTargetId(t.id);
+                      }}
+                      onDragLeave={() => {
+                        if (dropTargetId === t.id) setDropTargetId(null);
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        if (dragId !== null) reorderTab(dragId, t.id);
+                        setDragId(null);
+                        setDropTargetId(null);
+                      }}
+                    >
+                      <div
+                        className="reader-tile-header"
+                        draggable
+                        onDragStart={(e) => {
+                          setDragId(t.id);
+                          e.dataTransfer.effectAllowed = 'move';
+                          e.dataTransfer.setData('text/plain', String(t.id));
+                        }}
+                        onDragEnd={() => {
+                          setDragId(null);
+                          setDropTargetId(null);
+                        }}
+                        title="Drag to reorder"
+                      >
+                        <svg className="reader-tile-grip" width="12" height="14" viewBox="0 0 12 14" fill="none" aria-hidden="true">
+                          <circle cx="3" cy="3" r="1" fill="currentColor" />
+                          <circle cx="9" cy="3" r="1" fill="currentColor" />
+                          <circle cx="3" cy="7" r="1" fill="currentColor" />
+                          <circle cx="9" cy="7" r="1" fill="currentColor" />
+                          <circle cx="3" cy="11" r="1" fill="currentColor" />
+                          <circle cx="9" cy="11" r="1" fill="currentColor" />
+                        </svg>
+                        <span className="reader-tile-title">{t.title ?? '(untitled)'}</span>
+                        {tHref && (
+                          <a
+                            className="reader-tile-link"
+                            href={tHref}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            onClick={(e) => e.stopPropagation()}
+                            title="Open original"
+                            aria-label="Open original"
+                          >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                              <path d="M7 17L17 7M9 7h8v8" />
+                            </svg>
+                          </a>
+                        )}
+                        <button
+                          type="button"
+                          draggable={false}
+                          className="reader-tile-close"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            closeTab(t.id);
+                          }}
+                          aria-label="Close tile"
+                          title="Close"
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <path d="M18 6L6 18M6 6l12 12" />
+                          </svg>
+                        </button>
+                      </div>
+                      <div className="reader-tile-meta">
+                        <span className="reader-tile-feed">{t.feed_title ?? t.feed_url}</span>
+                        {t.published_at && (
+                          <time dateTime={new Date(t.published_at).toISOString()}>
+                            {new Date(t.published_at).toLocaleString()}
+                          </time>
+                        )}
+                      </div>
+                      <div className="reader-tile-body">
+                        {tileLoading ? (
+                          <div className="reader-skeleton" aria-label="Loading article">
+                            <div className="reader-skeleton-line" />
+                            <div className="reader-skeleton-line" />
+                            <div className="reader-skeleton-line" />
+                            <div className="reader-skeleton-line" />
+                          </div>
+                        ) : (
+                          <div
+                            className="reader-content reader-tile-content"
+                            dangerouslySetInnerHTML={{ __html: tileHtml }}
+                          />
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+            <div className={`reader-pane-scroll ${showOriginal && activeHref ? 'original' : ''}`}>
+              {activeItem && showOriginal && activeHref ? (
+                <iframe
+                  key={activeHref}
+                  className="reader-original-frame"
+                  src={activeHref}
+                  title={activeItem.title ?? 'Original page'}
+                  sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms"
+                  referrerPolicy="no-referrer"
+                />
+              ) : activeItem ? (
                 <article className="reader-article">
                   <h1 className="reader-article-title">
                     {activeReader?.title ?? activeItem.title ?? '(untitled)'}
@@ -578,6 +928,7 @@ export function App() {
                 <div className="reader-empty">Select an article to read.</div>
               )}
             </div>
+            )}
           </section>
         )}
       </div>
