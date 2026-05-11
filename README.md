@@ -14,50 +14,117 @@ article fetches so the browser can get around CORS.
 └──────────────────────────────┘
 ```
 
+## How the no-server architecture works
+
+Originally this app shipped a Node + SQLite server. It was rewritten to be
+fully static so it can live on GitHub Pages. Everything the old server did
+now happens client-side:
+
+| Old (Node server)                       | New (browser)                                       |
+| --------------------------------------- | --------------------------------------------------- |
+| SQLite (`better-sqlite3`)               | IndexedDB (`client/src/store.ts`)                   |
+| `rss-parser` + XML parsing in Node      | `DOMParser` + custom parser (`client/src/parser.ts`)|
+| `@mozilla/readability` + `jsdom`        | `@mozilla/readability` over `DOMParser` documents   |
+| `fetch()` from Node (no CORS)           | `fetch()` through a Cloudflare Worker proxy         |
+| Node SSRF guards, redirect cap, timeout | Same guards, ported into the Worker                 |
+
+The one piece that **can't** live in the browser is the outbound feed
+fetch — most RSS endpoints don't send `Access-Control-Allow-Origin`, so a
+GH-Pages-hosted SPA can't `fetch()` them directly. A ~150-line Cloudflare
+Worker handles those fetches and returns the body with permissive CORS.
+The Worker is the *only* thing that needs an account anywhere; the rest is
+flat files served by GitHub.
+
 ## Quick start (local dev)
 
 ```bash
-npm run install:all   # installs root, client, and worker deps
-# Deploy the Worker first (see "Deploy the Worker"), then:
-echo "VITE_PROXY_URL=https://feed-reader-proxy.<account>.workers.dev" > client/.env.local
-npm run dev           # vite on http://localhost:5173
+npm run install:all                      # root, client, and worker deps
+
+# Terminal 1 — local Worker on :8787
+npm run worker:dev
+
+# Terminal 2 — Vite on :5173, pointed at the local worker
+echo "VITE_PROXY_URL=http://localhost:8787" > client/.env.local
+npm run dev
 ```
 
-On first load with an empty IndexedDB, the client subscribes to six default
-feeds (Hacker News, Lobste.rs, The Verge, Ars Technica, Daring Fireball, BBC
-Tech). To reset, clear site data in DevTools → Application → Storage.
+Open <http://localhost:5173>. On first load with an empty IndexedDB the
+client subscribes to six default feeds (Hacker News, Lobste.rs, The Verge,
+Ars Technica, Daring Fireball, BBC Tech). To reset, clear site data in
+DevTools → Application → Storage.
 
-## Deploy the Worker
+`client/.env.local` is gitignored. For production builds the GH Actions
+workflow reads `VITE_PROXY_URL` from a repo variable instead (see below).
+
+## Deploying for real
+
+The deploy is two independent moving parts:
+
+1. **Cloudflare Worker** — the CORS proxy (one-time setup + redeploy on
+   change). Lives at `https://feed-reader-proxy.<subdomain>.workers.dev`.
+2. **GitHub Pages** — the static SPA. A push to `main` rebuilds and
+   redeploys via `.github/workflows/deploy.yml`.
+
+### 1. Deploy the Worker to Cloudflare
 
 The Worker proxies fetches with SSRF protection (private-IP block, redirect
-cap, scheme allowlist, 15s timeout, 10 MB body cap). See
-[`worker/README.md`](worker/README.md) for the full spec.
+cap, scheme allowlist, 15s timeout, 10 MB body cap). Full spec in
+[`worker/README.md`](worker/README.md).
 
 ```bash
 cd worker
 npm install
-npx wrangler login           # one-time
+npx wrangler login           # opens browser → authorize with your CF account
 npm run deploy
 ```
 
-Wrangler prints the deployed URL — e.g.
-`https://feed-reader-proxy.<account>.workers.dev`. That's the value you wire
-into the client as `VITE_PROXY_URL`.
+> **One-time:** after your first Workers deploy, Cloudflare will warn
+> *"You need to register a workers.dev subdomain before publishing"*. Open
+> <https://dash.cloudflare.com/> → **Workers & Pages** → **Overview** and
+> pick a subdomain (e.g. `bpasero` → `bpasero.workers.dev`). No redeploy
+> needed — the existing upload becomes reachable immediately.
 
-## Deploy the SPA to GitHub Pages
+The Worker URL is `https://feed-reader-proxy.<your-subdomain>.workers.dev`.
+You'll wire this into the client in step 2.
 
-The repo ships a workflow at `.github/workflows/deploy.yml` that builds the
-client and publishes it via `actions/deploy-pages`.
+#### Validate the Worker
 
-1. In GitHub: **Settings → Pages → Build and deployment → Source = GitHub
-   Actions**.
+```bash
+URL=https://feed-reader-proxy.<your-subdomain>.workers.dev
+FEED=https%3A%2F%2Fhnrss.org%2Ffrontpage
+
+curl -s "$URL/health"; echo                                                                            # {"ok":true}
+curl -s "$URL/?url=$FEED" | head -c 200; echo                                                          # <rss …>
+curl -sI -H "Origin: https://bpasero.github.io" "$URL/?url=$FEED" | grep -i access-control-allow-origin # echoes the allowed origin
+curl -sI -H "Origin: https://evil.example"      "$URL/?url=$FEED" | grep -i access-control-allow-origin # (no output — not allowlisted)
+curl -s -o /dev/null -w "%{http_code}\n" "$URL/?url=http%3A%2F%2Flocalhost%2F"                          # 400 (SSRF blocked)
+curl -s -o /dev/null -w "%{http_code}\n" "$URL/?url=http%3A%2F%2F%5B%3A%3Affff%3A7f00%3A1%5D%2F"        # 400 (IPv4-mapped IPv6 blocked)
+```
+
+The Worker only sets `Access-Control-Allow-Origin` for browser requests from
+allowlisted origins (`http://localhost:5173`, `http://127.0.0.1:5173`,
+`https://bpasero.github.io` — edit `worker/src/worker.ts` to change). Non-
+browser clients (curl, scripts) work without a CORS header.
+
+### 2. Deploy the SPA to GitHub Pages
+
+1. **Settings → Pages → Build and deployment → Source = GitHub Actions.**
 2. **Settings → Secrets and variables → Actions → Variables → New repository
-   variable**: `VITE_PROXY_URL` = your deployed Worker URL.
-3. Push to `main`. The action builds with `base: '/claude-one/'` and serves
-   the SPA at `https://<user>.github.io/claude-one/`.
+   variable**: `VITE_PROXY_URL` = your Worker URL from step 1.
+3. Push to `main` (or click *Run workflow* on
+   [`Deploy to GitHub Pages`](../../actions/workflows/deploy.yml)). The
+   workflow builds with `base: '/claude-one/'` and publishes to
+   `https://<user>.github.io/claude-one/`.
 
-The Vite base path is hardcoded to `/claude-one/` to match this repo name —
-edit `client/vite.config.ts` if you fork to a differently-named repo.
+If you fork to a differently-named repo, edit the `base` in
+`client/vite.config.ts` to match.
+
+#### Validate the SPA end-to-end
+
+Open the deployed URL with DevTools → Network. Feed requests should be
+`GET https://feed-reader-proxy.<…>.workers.dev/?url=…` returning `200 OK`
+with `access-control-allow-origin: *`. No CORS errors in the console. The
+sidebar should populate after the six default feeds finish fetching.
 
 ## Features
 

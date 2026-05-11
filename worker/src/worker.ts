@@ -4,15 +4,39 @@ const MAX_REDIRECTS = 5;
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10MB
 
-function corsHeaders(_origin: string | null): Record<string, string> {
-  return {
-    'Access-Control-Allow-Origin': '*',
+const ALLOWED_ORIGINS = new Set<string>([
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'https://bpasero.github.io',
+]);
+
+function corsHeaders(origin: string | null): Record<string, string> {
+  const headers: Record<string, string> = {
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
     'Access-Control-Max-Age': '86400',
     'Access-Control-Expose-Headers': 'X-Final-URL',
     Vary: 'Origin',
   };
+  if (origin && ALLOWED_ORIGINS.has(origin)) {
+    headers['Access-Control-Allow-Origin'] = origin;
+  }
+  return headers;
+}
+
+// `new URL("http://[::ffff:127.0.0.1]/").hostname` → "[::ffff:7f00:1]".
+// The URL parser keeps IPv4-mapped IPv6 in compressed hex form, so the dotted
+// quad isn't visible to our IPv4 regex. Unpack the trailing 32 bits back to
+// dotted form so we can run them through `isPrivateIp` for real.
+function ipv4MappedToDotted(lower: string): string | null {
+  if (!lower.startsWith('::ffff:')) return null;
+  const rest = lower.slice(7);
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(rest)) return rest;
+  const m = rest.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (!m) return null;
+  const hi = parseInt(m[1], 16);
+  const lo = parseInt(m[2], 16);
+  return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
 }
 
 function isPrivateIp(host: string): boolean {
@@ -24,13 +48,15 @@ function isPrivateIp(host: string): boolean {
     if (a === 169 && b === 254) return true;
     if (a === 192 && b === 168) return true;
     if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 (CGNAT)
     return false;
   }
   const lower = host.replace(/^\[|\]$/g, '').toLowerCase();
   if (lower === '::1' || lower === '::') return true;
   if (lower.startsWith('fe80:')) return true;
   if (/^f[cd][0-9a-f]{2}:/.test(lower)) return true;
-  if (lower.startsWith('::ffff:')) return isPrivateIp(lower.slice(7));
+  const mapped = ipv4MappedToDotted(lower);
+  if (mapped) return isPrivateIp(mapped);
   return false;
 }
 
