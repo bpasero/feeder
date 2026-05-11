@@ -30,6 +30,7 @@ rm server/data.db server/data.db-shm server/data.db-wal
 
 - Subscribe to any **RSS**, **Atom**, or **JSON Feed** URL.
 - **Three-column layout:** feed sidebar / item list / reader pane. The reader pane is togglable via the top-right panel icon and the preference is persisted to `localStorage`.
+- **Collapsible sidebar:** the top-left panel icon collapses the feed sidebar to a thin rail of avatars (unread feeds get an accent dot). Hovering or keyboard-focusing the rail expands the full sidebar as an overlay above the item list so you can pick another feed, then collapses back when you move away. Opening the inline "+" add-feed form keeps the sidebar expanded until you submit or cancel. Preference is persisted as `sidebarCollapsed`.
 - **Add-feed in the sidebar:** a compact `+` button in the sidebar header expands an inline URL input — no chrome at the top of the app. Esc cancels.
 - **Reader Mode:** clicking an item triggers a background fetch of the source URL on the server, which runs `@mozilla/readability` over the parsed DOM and returns clean extracted content (title, byline, body). Results are cached per item in a `reader_articles` table.
 - **Reader / Original toggle:** segmented control in the reader header. *Reader* shows the extracted article; *Original* renders the source page in a sandboxed iframe (`allow-scripts allow-popups allow-forms`, `no-referrer`). Choice is persisted as `showOriginal`. Sites that refuse to embed via `X-Frame-Options` / `frame-ancestors` can still be opened in a new tab with **Open original**.

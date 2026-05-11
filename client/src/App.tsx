@@ -102,6 +102,7 @@ export function App() {
   });
   const [showOriginal, setShowOriginal] = useState<boolean>(() => localStorage.getItem('showOriginal') === '1');
   const [gridMode, setGridMode] = useState<boolean>(() => localStorage.getItem('gridMode') === '1');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => localStorage.getItem('sidebarCollapsed') === '1');
   const [dragId, setDragId] = useState<number | null>(null);
   const [dropTargetId, setDropTargetId] = useState<number | null>(null);
   const [menu, setMenu] = useState<{ entries: MenuEntry[]; x: number; y: number } | null>(null);
@@ -117,6 +118,10 @@ export function App() {
   useEffect(() => {
     localStorage.setItem('gridMode', gridMode ? '1' : '0');
   }, [gridMode]);
+
+  useEffect(() => {
+    localStorage.setItem('sidebarCollapsed', sidebarCollapsed ? '1' : '0');
+  }, [sidebarCollapsed]);
 
   const loadFeeds = useCallback(async () => {
     try {
@@ -483,6 +488,18 @@ export function App() {
   return (
     <div className="app">
       <header className="topbar">
+        <button
+          className={`pane-toggle topbar-sidebar-toggle ${sidebarCollapsed ? 'on' : ''}`}
+          onClick={() => setSidebarCollapsed((v) => !v)}
+          title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          aria-pressed={sidebarCollapsed}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="2" />
+            <line x1="9" y1="4" x2="9" y2="20" />
+          </svg>
+        </button>
         <h1>Feed Reader</h1>
         <button onClick={handleRefreshAll} disabled={busy}>Refresh all</button>
         <label className="unread-toggle">
@@ -505,8 +522,8 @@ export function App() {
 
       {error && <div className="error" onClick={() => setError(null)}>{error}</div>}
 
-      <div className={`body ${readerPaneVisible ? '' : 'no-reader'}`}>
-        <aside className="sidebar">
+      <div className={`body ${readerPaneVisible ? '' : 'no-reader'} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+        <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''} ${sidebarCollapsed && addOpen ? 'force-expanded' : ''}`}>
           <div className="sidebar-header">
             <span className="sidebar-heading">Feeds</span>
             <button
@@ -549,6 +566,7 @@ export function App() {
           >
             <span className="feed-avatar feed-avatar-all" aria-hidden="true">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+              {totalUnread > 0 && <span className="feed-avatar-dot" />}
             </span>
             <span className="feed-title">All feeds</span>
             <span className="badge">{totalUnread}</span>
@@ -569,6 +587,7 @@ export function App() {
                 }}
               >
                 {avatarLabel(f)}
+                {f.unread_count > 0 && <span className="feed-avatar-dot" />}
               </span>
               <span className="feed-title" title={f.url}>{f.title ?? f.url}</span>
               <span className="badge">{f.unread_count}</span>
