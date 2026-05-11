@@ -1,107 +1,139 @@
 # Feed Reader
 
-A local-first RSS / Atom / JSON Feed reader. Node + SQLite on the server, Vite + React on the client. Includes a Reader Mode that fetches the source article and runs Mozilla Readability for clean, distraction-free reading.
+A static, **serverless RSS / Atom / JSON Feed reader**. The whole app is a
+single-page Vite + React build that runs entirely in the browser, storing
+feeds, items, and Reader Mode articles in IndexedDB. The only piece of
+backend is a ~150-line Cloudflare Worker that proxies outbound feed and
+article fetches so the browser can get around CORS.
 
-## Quick start
-
-```bash
-npm run install:all   # installs root, server, and client deps
-npm run dev           # starts both processes via concurrently
+```
+┌──────────────────────────────┐         ┌────────────────────────────┐
+│  GitHub Pages (static SPA)   │ ──────▶ │  Cloudflare Worker proxy   │ ──▶ feeds
+│  IndexedDB, Readability,     │         │  SSRF-guarded GET-only     │
+│  feed parsing — all in-browser│         └────────────────────────────┘
+└──────────────────────────────┘
 ```
 
-Open <http://localhost:5173>. The server runs on port 3001.
-
-On the very first launch (empty database) the server seeds six default feeds:
-
-- Hacker News — `https://hnrss.org/frontpage`
-- Lobste.rs — `https://lobste.rs/rss`
-- The Verge — `https://www.theverge.com/rss/index.xml`
-- Ars Technica — `https://feeds.arstechnica.com/arstechnica/index`
-- Daring Fireball — `https://daringfireball.net/feeds/main`
-- BBC News (Technology) — `https://feeds.bbci.co.uk/news/technology/rss.xml`
-
-Subsequent restarts do not re-seed. To reset and re-seed, delete the SQLite files:
+## Quick start (local dev)
 
 ```bash
-rm server/data.db server/data.db-shm server/data.db-wal
+npm run install:all   # installs root, client, and worker deps
+# Deploy the Worker first (see "Deploy the Worker"), then:
+echo "VITE_PROXY_URL=https://feed-reader-proxy.<account>.workers.dev" > client/.env.local
+npm run dev           # vite on http://localhost:5173
 ```
+
+On first load with an empty IndexedDB, the client subscribes to six default
+feeds (Hacker News, Lobste.rs, The Verge, Ars Technica, Daring Fireball, BBC
+Tech). To reset, clear site data in DevTools → Application → Storage.
+
+## Deploy the Worker
+
+The Worker proxies fetches with SSRF protection (private-IP block, redirect
+cap, scheme allowlist, 15s timeout, 10 MB body cap). See
+[`worker/README.md`](worker/README.md) for the full spec.
+
+```bash
+cd worker
+npm install
+npx wrangler login           # one-time
+npm run deploy
+```
+
+Wrangler prints the deployed URL — e.g.
+`https://feed-reader-proxy.<account>.workers.dev`. That's the value you wire
+into the client as `VITE_PROXY_URL`.
+
+## Deploy the SPA to GitHub Pages
+
+The repo ships a workflow at `.github/workflows/deploy.yml` that builds the
+client and publishes it via `actions/deploy-pages`.
+
+1. In GitHub: **Settings → Pages → Build and deployment → Source = GitHub
+   Actions**.
+2. **Settings → Secrets and variables → Actions → Variables → New repository
+   variable**: `VITE_PROXY_URL` = your deployed Worker URL.
+3. Push to `main`. The action builds with `base: '/claude-one/'` and serves
+   the SPA at `https://<user>.github.io/claude-one/`.
+
+The Vite base path is hardcoded to `/claude-one/` to match this repo name —
+edit `client/vite.config.ts` if you fork to a differently-named repo.
 
 ## Features
 
-- Subscribe to any **RSS**, **Atom**, or **JSON Feed** URL.
-- **Three-column layout:** feed sidebar / item list / reader pane. The reader pane is togglable via the top-right panel icon and the preference is persisted to `localStorage`.
-- **Collapsible sidebar:** the top-left panel icon collapses the feed sidebar to a thin rail of avatars (unread feeds get an accent dot). Hovering or keyboard-focusing the rail expands the full sidebar as an overlay above the item list so you can pick another feed, then collapses back when you move away. Opening the inline "+" add-feed form keeps the sidebar expanded until you submit or cancel. Preference is persisted as `sidebarCollapsed`.
-- **Add-feed in the sidebar:** a compact `+` button in the sidebar header expands an inline URL input — no chrome at the top of the app. Esc cancels.
-- **Reader Mode:** clicking an item triggers a background fetch of the source URL on the server, which runs `@mozilla/readability` over the parsed DOM and returns clean extracted content (title, byline, body). Results are cached per item in a `reader_articles` table.
-- **Reader / Original toggle:** segmented control in the reader header. *Reader* shows the extracted article; *Original* renders the source page in a sandboxed iframe (`allow-scripts allow-popups allow-forms`, `no-referrer`). Choice is persisted as `showOriginal`. Sites that refuse to embed via `X-Frame-Options` / `frame-ancestors` can still be opened in a new tab with **Open original**.
-- **Tabs:** each opened article becomes a tab in the reader pane. Middle-click closes a tab; the close (×) button shows on hover. Tabs survive switching feeds because each tab holds its own snapshot.
-- **Drag and drop:**
-  - Drag a tab in the strip to reorder it (dragged tab fades; drop target gets an accent indicator).
-  - Toggle **Grid view** (shown when ≥2 tabs are open, persisted as `gridMode`) to render every open tab as a tile in a CSS auto-fit grid (`minmax(300px, 1fr)`). Drag a tile by its header to reorder. The active tile gets an accent border; the reader-pane actions (mark read, open original, reader/original) apply to it.
-- **Light + dark theme** via `prefers-color-scheme` — no toggle required, OKLCH color tokens flip automatically.
+- Subscribe to any **RSS**, **Atom**, or **JSON Feed** URL. Parsed
+  client-side with `DOMParser`.
+- **Three-column layout:** feed sidebar / item list / reader pane. The
+  reader pane is togglable via the top-right panel icon and the preference
+  is persisted to `localStorage`.
+- **Collapsible sidebar:** the top-left panel icon collapses the feed
+  sidebar to a thin rail of avatars (unread feeds get an accent dot).
+  Hovering or keyboard-focusing the rail expands the full sidebar as an
+  overlay above the item list. Opening the inline "+" add-feed form keeps
+  the sidebar expanded.
+- **Reader Mode:** clicking an item triggers a fetch of the source URL
+  through the Worker proxy, then runs `@mozilla/readability` in the
+  browser. Extracted articles are cached in IndexedDB (`reader_articles`).
+- **Reader / Original toggle:** segmented control in the reader header.
+  *Reader* shows the extracted article; *Original* renders the source page
+  in a sandboxed iframe.
+- **Tabs + grid view:** every opened article becomes a tab; toggle Grid
+  view (≥2 tabs) to see them as tiles. Drag to reorder.
+- **Light + dark theme** via `prefers-color-scheme` — OKLCH tokens flip
+  automatically.
 - Per-feed unread counts, item read/unread state, bulk "Mark all read".
 - Manual refresh per feed or all at once.
-- **Context menus** (right-click) on every row:
-  - **All feeds:** Refresh all · Mark everything as read.
-  - **A feed:** Refresh · Mark all as read · Copy feed URL · Open homepage · Unsubscribe.
-  - **An item:** Mark as read/unread · Open original · Copy article URL.
+- **Context menus** (right-click) on feeds and items.
 
 ## Security
 
-Defenses live in `server/src/feeds.ts` and `server/src/index.ts`:
+The only network-exposed piece is the Worker. Defenses in `worker/src/worker.ts`:
 
-- **SSRF:** scheme allowlist (http/https only), DNS-resolved private/loopback/link-local IP block, redirect cap of 5 with re-validation per hop.
-- **CSRF:** middleware rejects state-changing requests when `Origin` is present and not on localhost.
-- **XSS:** all feed and reader content sanitized via DOMPurify before rendering.
-- **Fetch timeout:** every outbound HTTP call uses `AbortSignal.timeout(15000)`.
-- **Input validation:** `limit` query param clamped 1…500, `mark-all-read` rejects invalid `feedId`.
+- **SSRF:** scheme allowlist (http/https only), hostname checks block
+  literal private/loopback IP ranges, `localhost`, `*.local`, `*.internal`,
+  `*.localhost`. Redirect cap of 5 with re-validation per hop.
+- **Method allowlist:** only `GET` and `OPTIONS` reach upstream.
+- **Resource limits:** 15s upstream timeout, 10 MB body cap.
+- **CORS:** open (`Access-Control-Allow-Origin: *`). The proxy carries no
+  auth and no cookies, so an open public proxy is acceptable for this use.
+
+The client sanitizes all rendered feed and reader content with DOMPurify
+before injecting into the DOM.
 
 ## File layout
 
 ```
 .
-├── server/                # Hono + better-sqlite3 + Readability + jsdom
-│   └── src/
-│       ├── index.ts       # routes + CSRF middleware
-│       ├── db.ts          # SQLite schema (feeds, items, reader_articles)
-│       ├── feeds.ts       # SSRF-guarded fetch, RSS/Atom/JSON-Feed parsing
-│       ├── reader.ts      # Readability extraction + caching
-│       └── seed.ts        # default feeds on first run
-├── client/                # Vite + React + TypeScript
-│   └── src/
-│       ├── App.tsx        # main UI
-│       ├── api.ts         # typed API client
-│       └── styles.css     # OKLCH-based light/dark theme
-└── package.json           # root — `concurrently` runs both
+├── client/                    # Vite + React + TypeScript
+│   ├── src/
+│   │   ├── App.tsx            # main UI
+│   │   ├── api.ts             # facade over store + proxy + parser + reader
+│   │   ├── store.ts           # IndexedDB wrapper (feeds, items, reader_articles)
+│   │   ├── parser.ts          # RSS / Atom / JSON Feed parsing via DOMParser
+│   │   ├── reader.ts          # @mozilla/readability extraction
+│   │   ├── proxy.ts           # client wrapper around the Worker proxy
+│   │   ├── seed.ts            # default feed list for first-run
+│   │   └── styles.css         # OKLCH light/dark theme
+│   └── vite.config.ts         # base = '/claude-one/' in production
+├── worker/                    # Cloudflare Worker (CORS / SSRF-guarded proxy)
+│   └── src/worker.ts
+├── .github/workflows/
+│   └── deploy.yml             # builds client, deploys to GitHub Pages
+└── package.json               # root scripts
 ```
 
 ## Scripts
 
-| Command                | What it does                                |
-| ---------------------- | ------------------------------------------- |
-| `npm run install:all`  | Install root, server, and client deps       |
-| `npm run dev`          | Run server (3001) + client (5173) together  |
-| `npm run dev:server`   | Run only the server                         |
-| `npm run dev:client`   | Run only the client                         |
-| `npm run build`        | Production build of the client              |
-
-## API
-
-All endpoints are mounted under `/api`. State-changing endpoints (POST/PATCH/DELETE) require either no `Origin` header or one on `localhost`.
-
-| Method | Path                                | Body / Query                          | Description                              |
-| ------ | ----------------------------------- | ------------------------------------- | ---------------------------------------- |
-| GET    | `/api/feeds`                        | —                                     | All feeds + unread/total counts          |
-| POST   | `/api/feeds`                        | `{ url }`                             | Subscribe (fetches + parses)             |
-| DELETE | `/api/feeds/:id`                    | —                                     | Unsubscribe                              |
-| POST   | `/api/feeds/:id/refresh`            | —                                     | Re-fetch one feed                        |
-| POST   | `/api/feeds/refresh-all`            | —                                     | Re-fetch every subscribed feed           |
-| GET    | `/api/items`                        | `feedId?`, `unread=1?`, `limit≤500?`  | List items                               |
-| PATCH  | `/api/items/:id`                    | `{ read: boolean }`                   | Mark read/unread                         |
-| POST   | `/api/items/mark-all-read`          | `{ feedId? }`                         | Bulk mark — feed or everything           |
-| GET    | `/api/items/:id/reader`             | `refresh=1?`                          | Reader-mode extracted article (cached)   |
+| Command                | What it does                                            |
+| ---------------------- | ------------------------------------------------------- |
+| `npm run install:all`  | Install root, client, and worker deps                   |
+| `npm run dev`          | Run the Vite dev server (5173)                          |
+| `npm run build`        | Production build of the client (`client/dist/`)         |
+| `npm run preview`      | Preview the production build locally                    |
+| `npm run worker:dev`   | Run the Worker locally via `wrangler dev`               |
+| `npm run worker:deploy`| Deploy the Worker to your Cloudflare account            |
 
 ## Requirements
 
-- Node 18+ (Node 22 recommended)
-- macOS, Linux, or Windows
+- Node 20+
+- A Cloudflare account (Workers free tier is plenty)
