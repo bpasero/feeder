@@ -34,6 +34,10 @@ rm server/data.db server/data.db-shm server/data.db-wal
 - **Light + dark theme** via `prefers-color-scheme` — no toggle required, OKLCH color tokens flip automatically.
 - Per-feed unread counts, item read/unread state, bulk "Mark all read".
 - Manual refresh per feed or all at once.
+- **Context menus** (right-click) on every row:
+  - **All feeds:** Refresh all · Mark everything as read.
+  - **A feed:** Refresh · Mark all as read · Copy feed URL · Open homepage · Unsubscribe.
+  - **An item:** Mark as read/unread · Open original · Copy article URL.
 
 ## Security
 

@@ -1,6 +1,55 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import DOMPurify from 'dompurify';
 import { api, type Feed, type Item, type ReaderArticle } from './api';
+import { ContextMenu, type MenuEntry } from './ContextMenu';
+
+const ICONS = {
+  refresh: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 2v6h6" />
+      <path d="M21 12A9 9 0 0 0 6 5.3L3 8" />
+      <path d="M21 22v-6h-6" />
+      <path d="M3 12a9 9 0 0 0 15 6.7L21 16" />
+    </svg>
+  ),
+  check: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 6L9 17l-5-5" />
+    </svg>
+  ),
+  copy: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="9" y="9" width="13" height="13" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  ),
+  external: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M7 17L17 7M9 7h8v8" />
+    </svg>
+  ),
+  trash: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 6h18" />
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+    </svg>
+  ),
+  eye: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  ),
+  eyeOff: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9.88 9.88a3 3 0 1 0 4.24 4.24" />
+      <path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68" />
+      <path d="M6.61 6.61A13.5 13.5 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61" />
+      <line x1="2" y1="2" x2="22" y2="22" />
+    </svg>
+  ),
+};
 
 type Selection = { kind: 'all' } | { kind: 'feed'; id: number };
 
@@ -48,6 +97,7 @@ export function App() {
     const stored = localStorage.getItem('readerPaneVisible');
     return stored === null ? true : stored === '1';
   });
+  const [menu, setMenu] = useState<{ entries: MenuEntry[]; x: number; y: number } | null>(null);
 
   useEffect(() => {
     localStorage.setItem('readerPaneVisible', readerPaneVisible ? '1' : '0');
@@ -211,6 +261,132 @@ export function App() {
   const totalUnread = feeds.reduce((acc, f) => acc + f.unread_count, 0);
   const activeHref = activeItem ? safeHref(activeItem.url) : undefined;
 
+  function openMenu(e: React.MouseEvent, entries: MenuEntry[]) {
+    e.preventDefault();
+    e.stopPropagation();
+    setMenu({ entries, x: e.clientX, y: e.clientY });
+  }
+
+  function allFeedsMenu(): MenuEntry[] {
+    return [
+      {
+        kind: 'item',
+        label: 'Refresh all',
+        icon: ICONS.refresh,
+        onClick: handleRefreshAll,
+      },
+      {
+        kind: 'item',
+        label: 'Mark all as read',
+        icon: ICONS.check,
+        onClick: async () => {
+          try {
+            await api.markAllRead();
+            await loadFeeds();
+            await reloadItems();
+          } catch (e) {
+            setError((e as Error).message);
+          }
+        },
+        disabled: totalUnread === 0,
+      },
+    ];
+  }
+
+  function feedMenu(f: Feed): MenuEntry[] {
+    const entries: MenuEntry[] = [
+      {
+        kind: 'item',
+        label: 'Refresh',
+        icon: ICONS.refresh,
+        onClick: async () => {
+          try {
+            await api.refreshFeed(f.id);
+            await loadFeeds();
+            await reloadItems();
+          } catch (e) {
+            setError((e as Error).message);
+          }
+        },
+      },
+      {
+        kind: 'item',
+        label: 'Mark all as read',
+        icon: ICONS.check,
+        onClick: async () => {
+          try {
+            await api.markAllRead(f.id);
+            await loadFeeds();
+            await reloadItems();
+          } catch (e) {
+            setError((e as Error).message);
+          }
+        },
+        disabled: f.unread_count === 0,
+      },
+      { kind: 'separator' },
+      {
+        kind: 'item',
+        label: 'Copy feed URL',
+        icon: ICONS.copy,
+        onClick: () => navigator.clipboard.writeText(f.url),
+      },
+    ];
+    if (f.site_url && safeHref(f.site_url)) {
+      entries.push({
+        kind: 'item',
+        label: 'Open homepage',
+        icon: ICONS.external,
+        onClick: () => {
+          window.open(f.site_url!, '_blank', 'noopener,noreferrer');
+        },
+      });
+    }
+    entries.push(
+      { kind: 'separator' },
+      {
+        kind: 'item',
+        label: 'Unsubscribe',
+        icon: ICONS.trash,
+        destructive: true,
+        onClick: () => handleDeleteFeed(f.id),
+      }
+    );
+    return entries;
+  }
+
+  function itemMenu(it: Item): MenuEntry[] {
+    const href = safeHref(it.url);
+    const entries: MenuEntry[] = [
+      {
+        kind: 'item',
+        label: it.read ? 'Mark as unread' : 'Mark as read',
+        icon: it.read ? ICONS.eyeOff : ICONS.eye,
+        onClick: () => handleToggleRead(it),
+      },
+      { kind: 'separator' },
+    ];
+    if (href) {
+      entries.push({
+        kind: 'item',
+        label: 'Open original',
+        icon: ICONS.external,
+        onClick: () => {
+          window.open(href, '_blank', 'noopener,noreferrer');
+        },
+      });
+    }
+    if (it.url) {
+      entries.push({
+        kind: 'item',
+        label: 'Copy article URL',
+        icon: ICONS.copy,
+        onClick: () => navigator.clipboard.writeText(it.url!),
+      });
+    }
+    return entries;
+  }
+
   return (
     <div className="app">
       <header className="topbar">
@@ -251,6 +427,7 @@ export function App() {
           <div
             className={`feed-item ${selection.kind === 'all' ? 'active' : ''}`}
             onClick={() => setSelection({ kind: 'all' })}
+            onContextMenu={(e) => openMenu(e, allFeedsMenu())}
           >
             <span className="feed-avatar feed-avatar-all" aria-hidden="true">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
@@ -263,6 +440,7 @@ export function App() {
               key={f.id}
               className={`feed-item ${selection.kind === 'feed' && selection.id === f.id ? 'active' : ''}`}
               onClick={() => setSelection({ kind: 'feed', id: f.id })}
+              onContextMenu={(e) => openMenu(e, feedMenu(f))}
             >
               <span
                 className="feed-avatar"
@@ -302,6 +480,7 @@ export function App() {
                 key={it.id}
                 className={`item ${it.read ? 'read' : 'unread'} ${activeItemId === it.id ? 'active' : ''}`}
                 onClick={() => handleOpenItem(it)}
+                onContextMenu={(e) => openMenu(e, itemMenu(it))}
               >
                 <div className="item-meta">
                   <span className="item-feed">{it.feed_title ?? 'Unknown'}</span>
@@ -402,6 +581,15 @@ export function App() {
           </section>
         )}
       </div>
+
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          entries={menu.entries}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
   );
 }
