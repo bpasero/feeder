@@ -13,6 +13,12 @@ export function sanitizeHtml(raw: string): string {
   return DOMPurify.sanitize(raw, { ADD_ATTR: ['target'] });
 }
 
+export function htmlToPlainText(raw: string, max = 200): string {
+  const stripped = DOMPurify.sanitize(raw, { ALLOWED_TAGS: [], ALLOWED_ATTR: [] });
+  const text = stripped.replace(/\s+/g, ' ').trim();
+  return text.length > max ? text.slice(0, max).trimEnd() + '…' : text;
+}
+
 export function isSafeHttpUrl(value: string): boolean {
   try {
     const u = new URL(value);

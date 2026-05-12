@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type Feed, type Item, type ReaderArticle } from './api';
 import { ContextMenu, type MenuEntry } from './ContextMenu';
-import { sanitizeHtml, isSafeHttpUrl } from './sanitize';
+import { sanitizeHtml, isSafeHttpUrl, htmlToPlainText } from './sanitize';
 
 const ICONS = {
   refresh: (
@@ -624,7 +624,10 @@ export function App() {
                   {it.published_at && <span className="item-date">{new Date(it.published_at).toLocaleString()}</span>}
                 </div>
                 <div className="item-title">{it.title ?? '(untitled)'}</div>
-                {it.summary && <div className="item-summary">{it.summary.slice(0, 200)}</div>}
+                {it.summary && (() => {
+                  const preview = htmlToPlainText(it.summary);
+                  return preview ? <div className="item-summary">{preview}</div> : null;
+                })()}
               </li>
             ))}
             {items.length === 0 && <li className="empty">No items.</li>}
