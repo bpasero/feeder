@@ -15,7 +15,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install client deps
+        run: npm ci
+        working-directory: client
+      - name: Install worker deps
+        run: npm ci
+        working-directory: worker
+      - name: Run client tests
+        run: npm test
+        working-directory: client
+      - name: Run worker tests
+        run: npm test
+        working-directory: worker
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

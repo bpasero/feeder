@@ -10,7 +10,7 @@ const ALLOWED_ORIGINS = new Set<string>([
   'https://bpasero.github.io',
 ]);
 
-function corsHeaders(origin: string | null): Record<string, string> {
+export function corsHeaders(origin: string | null): Record<string, string> {
   const headers: Record<string, string> = {
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
@@ -28,18 +28,18 @@ function corsHeaders(origin: string | null): Record<string, string> {
 // The URL parser keeps IPv4-mapped IPv6 in compressed hex form, so the dotted
 // quad isn't visible to our IPv4 regex. Unpack the trailing 32 bits back to
 // dotted form so we can run them through `isPrivateIp` for real.
-function ipv4MappedToDotted(lower: string): string | null {
+export function ipv4MappedToDotted(lower: string): string | null {
   if (!lower.startsWith('::ffff:')) return null;
   const rest = lower.slice(7);
   if (/^\d+\.\d+\.\d+\.\d+$/.test(rest)) return rest;
   const m = rest.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
   if (!m) return null;
-  const hi = parseInt(m[1], 16);
-  const lo = parseInt(m[2], 16);
+  const hi = parseInt(m[1]!, 16);
+  const lo = parseInt(m[2]!, 16);
   return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
 }
 
-function isPrivateIp(host: string): boolean {
+export function isPrivateIp(host: string): boolean {
   const m4 = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
   if (m4) {
     const a = Number(m4[1]);
@@ -60,7 +60,7 @@ function isPrivateIp(host: string): boolean {
   return false;
 }
 
-function isUnsafeHost(host: string): boolean {
+export function isUnsafeHost(host: string): boolean {
   const h = host.toLowerCase();
   if (h === 'localhost') return true;
   if (h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.localhost')) return true;

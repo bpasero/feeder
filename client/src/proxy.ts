@@ -1,20 +1,23 @@
 // Resolves the upstream Cloudflare Worker URL. Configured via VITE_PROXY_URL.
-const RAW = (import.meta.env.VITE_PROXY_URL as string | undefined) ?? '';
-const PROXY_URL = RAW.replace(/\/$/, '');
+
+function readProxyUrl(): string {
+  return ((import.meta.env.VITE_PROXY_URL as string | undefined) ?? '').replace(/\/$/, '');
+}
 
 export function isProxyConfigured(): boolean {
-  return PROXY_URL.length > 0;
+  return readProxyUrl().length > 0;
 }
 
 export function proxyUrl(): string {
-  return PROXY_URL;
+  return readProxyUrl();
 }
 
 export async function proxyFetch(target: string): Promise<{ body: string; contentType: string; finalUrl: string }> {
-  if (!isProxyConfigured()) {
+  const base = readProxyUrl();
+  if (!base) {
     throw new Error('Feed proxy not configured. Set VITE_PROXY_URL to the deployed Cloudflare Worker URL.');
   }
-  const u = `${PROXY_URL}/?url=${encodeURIComponent(target)}`;
+  const u = `${base}/?url=${encodeURIComponent(target)}`;
   const res = await fetch(u, { method: 'GET' });
   if (!res.ok) {
     const text = await res.text().catch(() => '');

@@ -156,16 +156,61 @@ sidebar should populate after the six default feeds finish fetching.
 
 The only network-exposed piece is the Worker. Defenses in `worker/src/worker.ts`:
 
-- **SSRF:** scheme allowlist (http/https only), hostname checks block
-  literal private/loopback IP ranges, `localhost`, `*.local`, `*.internal`,
-  `*.localhost`. Redirect cap of 5 with re-validation per hop.
+- **SSRF:** scheme allowlist (http/https only); hostname checks block
+  literal private/loopback IP ranges (`10/8`, `127/8`, `169.254/16`,
+  `172.16-31/12`, `192.168/16`, `100.64/10` CGNAT), `localhost`, `*.local`,
+  `*.internal`, `*.localhost`, IPv6 loopback/link-local/ULA, and
+  IPv4-mapped-IPv6 forms (`[::ffff:7f00:1]`). The WHATWG URL parser
+  normalizes alternate IPv4 encodings (decimal, hex, octal) before the
+  check runs. Redirect cap of 5 with re-validation per hop.
 - **Method allowlist:** only `GET` and `OPTIONS` reach upstream.
 - **Resource limits:** 15s upstream timeout, 10 MB body cap.
-- **CORS:** open (`Access-Control-Allow-Origin: *`). The proxy carries no
-  auth and no cookies, so an open public proxy is acceptable for this use.
+- **CORS allowlist:** `Access-Control-Allow-Origin` is only set when the
+  request's `Origin` header matches `ALLOWED_ORIGINS` (configurable at the
+  top of `worker/src/worker.ts`). Non-browser clients work without it.
 
 The client sanitizes all rendered feed and reader content with DOMPurify
 before injecting into the DOM.
+
+## Testing
+
+Both projects have Vitest suites — 133 tests total, no network and no
+real filesystem touched.
+
+```bash
+npm test                # client + worker
+npm run test:client     # client only
+npm run test:worker     # worker only
+npm --prefix client run test:watch       # client watch mode
+npm --prefix client run test:coverage    # v8 coverage report
+```
+
+What's covered:
+
+- **`worker/src/worker.test.ts`** (79 tests) — every SSRF case
+  (private IPv4 ranges including CGNAT; IPv6 loopback / link-local / ULA;
+  IPv4-mapped-IPv6 in both dotted and compressed-hex form; alternate IPv4
+  encodings; `localhost` / `.local` / `.internal` / `.localhost`); the
+  CORS origin allowlist; the full HTTP handler (OPTIONS, GET, POST,
+  `/health`, missing url, scheme allowlist, redirects to public + private,
+  too many redirects, missing Location, body size cap via both
+  Content-Length and actual bytes, upstream errors).
+- **`client/src/parser.test.ts`** (24 tests) — RSS 2.0 (with
+  `content:encoded`, `dc:creator`, missing-field fallbacks); Atom (`link
+  rel=alternate`, `author/name`, `published` → `updated` fallback,
+  `content` → `summary` fallback); JSON Feed (`content_html` vs
+  `content_text`, `url` vs `external_url`, `authors[]` vs `author`,
+  version validation); malformed XML, unsupported root, RSS missing
+  channel.
+- **`client/src/store.test.ts`** (23 tests) — IndexedDB CRUD,
+  unique-URL constraint, cascading delete (feed → items → reader
+  articles), upsert by `(feed_id, guid)`, sort by `published_at`,
+  read/unread filtering, `markAllRead` with and without `feedId`,
+  unread-count aggregation, reader article round-trip. Uses
+  `fake-indexeddb` — no browser needed.
+- **`client/src/proxy.test.ts`** (7 tests) — env-var configured /
+  unconfigured, URL encoding of the target, `X-Final-URL` header,
+  non-2xx error surfacing, empty-body fallback to statusText.
 
 ## File layout
 
@@ -176,16 +221,23 @@ before injecting into the DOM.
 │   │   ├── App.tsx            # main UI
 │   │   ├── api.ts             # facade over store + proxy + parser + reader
 │   │   ├── store.ts           # IndexedDB wrapper (feeds, items, reader_articles)
+│   │   ├── store.test.ts      # IndexedDB CRUD tests (fake-indexeddb)
 │   │   ├── parser.ts          # RSS / Atom / JSON Feed parsing via DOMParser
+│   │   ├── parser.test.ts     # parser format coverage
 │   │   ├── reader.ts          # @mozilla/readability extraction
 │   │   ├── proxy.ts           # client wrapper around the Worker proxy
+│   │   ├── proxy.test.ts      # proxy wrapper tests (mocked fetch)
 │   │   ├── seed.ts            # default feed list for first-run
 │   │   └── styles.css         # OKLCH light/dark theme
-│   └── vite.config.ts         # base = '/claude-one/' in production
+│   ├── vite.config.ts         # base = '/claude-one/' in production
+│   └── vitest.config.ts       # jsdom env + fake-indexeddb setup
 ├── worker/                    # Cloudflare Worker (CORS / SSRF-guarded proxy)
-│   └── src/worker.ts
+│   └── src/
+│       ├── worker.ts
+│       └── worker.test.ts     # SSRF, CORS, handler tests
 ├── .github/workflows/
-│   └── deploy.yml             # builds client, deploys to GitHub Pages
+│   ├── deploy.yml             # main: test → build → deploy to GitHub Pages
+│   └── test.yml               # PR / branch pushes: test only
 └── package.json               # root scripts
 ```
 
@@ -197,6 +249,9 @@ before injecting into the DOM.
 | `npm run dev`          | Run the Vite dev server (5173)                          |
 | `npm run build`        | Production build of the client (`client/dist/`)         |
 | `npm run preview`      | Preview the production build locally                    |
+| `npm test`             | Run all client + worker tests                           |
+| `npm run test:client`  | Run client tests only                                   |
+| `npm run test:worker`  | Run worker tests only                                   |
 | `npm run worker:dev`   | Run the Worker locally via `wrangler dev`               |
 | `npm run worker:deploy`| Deploy the Worker to your Cloudflare account            |
 

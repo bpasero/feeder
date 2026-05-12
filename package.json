@@ -8,6 +8,9 @@
     "build": "npm --prefix client run build",
     "preview": "npm --prefix client run preview",
     "install:all": "npm install && npm --prefix client install && npm --prefix worker install",
+    "test": "npm --prefix client run test && npm --prefix worker run test",
+    "test:client": "npm --prefix client run test",
+    "test:worker": "npm --prefix worker run test",
     "worker:dev": "npm --prefix worker run dev",
     "worker:deploy": "npm --prefix worker run deploy"
   }

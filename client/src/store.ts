@@ -41,6 +41,12 @@ export type StoredReader = {
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
+// Drops the cached connection so the next call to `openDb` re-opens. Used by
+// tests after wiping `indexedDB`; never invoked in app code.
+export function _resetForTests(): void {
+  dbPromise = null;
+}
+
 function openDb(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
@@ -79,22 +85,30 @@ function tx<T>(
         const transaction = db.transaction(names, mode);
         const stores = names.map((n) => transaction.objectStore(n));
         let result: T;
-        let pending = true;
+        let resolved = false;
+        let runError: unknown = null;
+        // Capture request-level errors here; the IDB event handlers below
+        // decide which outcome reaches the outer promise. We don't reject
+        // the outer promise from here directly because that would race the
+        // transaction's own error/abort events.
         Promise.resolve(run(stores))
           .then((value) => {
             result = value;
-            pending = false;
+            resolved = true;
           })
           .catch((err) => {
-            pending = false;
-            transaction.abort();
-            reject(err);
+            runError = err;
           });
         transaction.oncomplete = () => {
-          if (!pending) resolve(result);
+          if (resolved) resolve(result);
+          else reject(runError ?? new Error('transaction completed without result'));
         };
-        transaction.onerror = () => reject(transaction.error);
-        transaction.onabort = () => reject(transaction.error ?? new Error('transaction aborted'));
+        // `onerror` fires before `onabort` and can race the request-level
+        // rejection — at that point `transaction.error` is sometimes still
+        // null. `onabort` runs after request microtasks settle, so by the
+        // time it fires `runError` and `transaction.error` are populated.
+        transaction.onabort = () =>
+          reject(runError ?? transaction.error ?? new Error('transaction aborted'));
       })
   );
 }
