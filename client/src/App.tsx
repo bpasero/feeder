@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import DOMPurify from 'dompurify';
 import { api, type Feed, type Item, type ReaderArticle } from './api';
 import { ContextMenu, type MenuEntry } from './ContextMenu';
+import { sanitizeHtml, isSafeHttpUrl } from './sanitize';
 
 const ICONS = {
   refresh: (
@@ -54,13 +54,8 @@ const ICONS = {
 type Selection = { kind: 'all' } | { kind: 'feed'; id: number };
 
 function safeHref(u: string | null): string | undefined {
-  if (!u) return undefined;
-  try {
-    const proto = new URL(u).protocol;
-    return proto === 'http:' || proto === 'https:' ? u : undefined;
-  } catch {
-    return undefined;
-  }
+  if (!u || !isSafeHttpUrl(u)) return undefined;
+  return u;
 }
 
 function avatarLabel(f: Feed): string {
@@ -171,7 +166,7 @@ export function App() {
   const sanitizedContent = useMemo(() => {
     if (!activeItem) return '';
     const raw = activeReader?.content ?? activeItem.content ?? activeItem.summary ?? '<em>No content.</em>';
-    return DOMPurify.sanitize(raw, { ADD_ATTR: ['target', 'rel'] });
+    return sanitizeHtml(raw);
   }, [activeItem, activeReader]);
 
   useEffect(() => {
@@ -204,11 +199,16 @@ export function App() {
 
   async function handleAddFeed(e: React.FormEvent) {
     e.preventDefault();
-    if (!addUrl.trim() || busy) return;
+    const trimmed = addUrl.trim();
+    if (!trimmed || busy) return;
+    if (!isSafeHttpUrl(trimmed)) {
+      setError('Feed URL must be an http(s) URL.');
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      await api.addFeed(addUrl.trim());
+      await api.addFeed(trimmed);
       setAddUrl('');
       setAddOpen(false);
       await loadFeeds();
@@ -786,7 +786,7 @@ export function App() {
                   const tHref = safeHref(t.url);
                   const cached = readerArticles[t.id];
                   const tileRaw = cached?.content ?? t.content ?? t.summary ?? '<em>No content.</em>';
-                  const tileHtml = DOMPurify.sanitize(tileRaw, { ADD_ATTR: ['target', 'rel'] });
+                  const tileHtml = sanitizeHtml(tileRaw);
                   const tileLoading = readerLoadingId === t.id && !cached;
                   return (
                     <div
@@ -898,7 +898,7 @@ export function App() {
                   className="reader-original-frame"
                   src={activeHref}
                   title={activeItem.title ?? 'Original page'}
-                  sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms"
+                  sandbox="allow-scripts allow-popups"
                   referrerPolicy="no-referrer"
                 />
               ) : activeItem ? (

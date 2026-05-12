@@ -3,6 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; base-uri 'self'; form-action 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; font-src 'self' https: data:; media-src 'self' https: data: blob:; frame-src https:; connect-src 'self' https: ws: wss:; manifest-src 'self'; worker-src 'self' blob:;"
+    />
+    <meta name="referrer" content="no-referrer" />
     <title>Feed Reader</title>
   </head>
   <body>

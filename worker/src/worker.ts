@@ -3,6 +3,8 @@
 const MAX_REDIRECTS = 5;
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10MB
+const MAX_URL_LENGTH = 2048;
+const ALLOWED_PORTS = new Set<string>(['', '80', '443', '8080', '8443']);
 
 const ALLOWED_ORIGINS = new Set<string>([
   'http://localhost:5173',
@@ -16,6 +18,8 @@ export function corsHeaders(origin: string | null): Record<string, string> {
     'Access-Control-Allow-Headers': 'Content-Type',
     'Access-Control-Max-Age': '86400',
     'Access-Control-Expose-Headers': 'X-Final-URL',
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
     Vary: 'Origin',
   };
   if (origin && ALLOWED_ORIGINS.has(origin)) {
@@ -60,52 +64,123 @@ export function isPrivateIp(host: string): boolean {
   return false;
 }
 
-export function isUnsafeHost(host: string): boolean {
-  const h = host.toLowerCase();
+function normalizeHost(host: string): string {
+  let h = host.toLowerCase();
+  while (h.endsWith('.')) h = h.slice(0, -1);
+  return h;
+}
+
+export function isUnsafeHost(host: string, selfHost?: string | null): boolean {
+  const h = normalizeHost(host);
+  if (!h) return true;
+  if (selfHost && h === selfHost) return true; // self-recursion guard
   if (h === 'localhost') return true;
   if (h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.localhost')) return true;
   if (isPrivateIp(h)) return true;
   return false;
 }
 
-async function safeFetch(target: string): Promise<{ res: Response; finalUrl: string } | Response> {
+function sanitizeTargetUrl(raw: string, selfHost: string | null): URL | { error: string } {
+  if (raw.length > MAX_URL_LENGTH) return { error: 'url too long' };
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return { error: 'invalid url' };
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    return { error: `unsupported scheme: ${u.protocol}` };
+  }
+  if (!ALLOWED_PORTS.has(u.port)) {
+    return { error: `port not allowed: ${u.port}` };
+  }
+  if (u.username || u.password) {
+    u.username = '';
+    u.password = '';
+  }
+  u.hash = '';
+  if (isUnsafeHost(u.hostname, selfHost)) {
+    return { error: 'refusing to fetch private/loopback/internal host' };
+  }
+  return u;
+}
+
+async function readBodyWithCap(
+  res: Response,
+  cap: number,
+): Promise<ArrayBuffer | { error: string }> {
+  if (!res.body) return new ArrayBuffer(0);
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > cap) {
+      try {
+        await reader.cancel();
+      } catch {
+        // swallow
+      }
+      return { error: 'upstream response too large' };
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.byteLength;
+  }
+  return out.buffer;
+}
+
+async function safeFetch(
+  target: string,
+  selfHost: string | null,
+): Promise<{ res: Response; finalUrl: string } | Response> {
   let current = target;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    let u: URL;
-    try {
-      u = new URL(current);
-    } catch {
-      return new Response('invalid url', { status: 400 });
+    const checked = sanitizeTargetUrl(current, selfHost);
+    if ('error' in checked) {
+      return new Response(checked.error, { status: 400 });
     }
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
-      return new Response(`unsupported scheme: ${u.protocol}`, { status: 400 });
-    }
-    if (isUnsafeHost(u.hostname)) {
-      return new Response('refusing to fetch private/loopback host', { status: 400 });
-    }
+    current = checked.toString();
     let upstream: Response;
     try {
       upstream = await fetch(current, {
         method: 'GET',
         redirect: 'manual',
         headers: {
-          'User-Agent': 'feed-reader-proxy/0.1 (+https://github.com/bpasero/claude-one)',
+          'User-Agent':
+            'feed-reader-proxy/0.1 (+https://github.com/bpasero/claude-one)',
           Accept:
             'application/json, application/feed+json, application/rss+xml, application/atom+xml, application/xml;q=0.9, text/html;q=0.85, */*;q=0.8',
         },
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       });
     } catch (err) {
-      return new Response(`upstream fetch failed: ${(err as Error).message}`, { status: 502 });
+      return new Response(`upstream fetch failed: ${(err as Error).message}`, {
+        status: 502,
+      });
     }
     if (upstream.status >= 300 && upstream.status < 400) {
       const loc = upstream.headers.get('location');
       if (!loc) return new Response('redirect with no location', { status: 502 });
+      let next: string;
       try {
-        current = new URL(loc, current).toString();
+        next = new URL(loc, current).toString();
       } catch {
         return new Response('invalid redirect location', { status: 502 });
       }
+      try {
+        await upstream.body?.cancel();
+      } catch {
+        // ignore
+      }
+      current = next;
       continue;
     }
     return { res: upstream, finalUrl: current };
@@ -123,20 +198,30 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === '/health') {
       return new Response(JSON.stringify({ ok: true }), {
-        headers: { 'Content-Type': 'application/json', ...corsHeaders(origin) },
+        headers: {
+          'Content-Type': 'application/json',
+          ...corsHeaders(origin),
+        },
       });
     }
     if (request.method !== 'GET') {
-      return new Response('method not allowed', { status: 405, headers: corsHeaders(origin) });
+      return new Response('method not allowed', {
+        status: 405,
+        headers: corsHeaders(origin),
+      });
     }
     const target = url.searchParams.get('url');
     if (!target) {
-      return new Response('missing url query param', { status: 400, headers: corsHeaders(origin) });
+      return new Response('missing url query param', {
+        status: 400,
+        headers: corsHeaders(origin),
+      });
     }
 
-    const result = await safeFetch(target);
+    const selfHost = normalizeHost(url.hostname);
+    const result = await safeFetch(target, selfHost);
     if (result instanceof Response) {
-      const headers = new Headers(result.headers);
+      const headers = new Headers();
       for (const [k, v] of Object.entries(corsHeaders(origin))) headers.set(k, v);
       return new Response(result.body, { status: result.status, headers });
     }
@@ -144,17 +229,24 @@ export default {
 
     const lenHeader = res.headers.get('content-length');
     if (lenHeader && Number(lenHeader) > MAX_BODY_BYTES) {
-      return new Response('upstream response too large', { status: 502, headers: corsHeaders(origin) });
+      return new Response('upstream response too large', {
+        status: 502,
+        headers: corsHeaders(origin),
+      });
     }
 
-    const buf = await res.arrayBuffer();
-    if (buf.byteLength > MAX_BODY_BYTES) {
-      return new Response('upstream response too large', { status: 502, headers: corsHeaders(origin) });
+    const buf = await readBodyWithCap(res, MAX_BODY_BYTES);
+    if (!(buf instanceof ArrayBuffer)) {
+      return new Response(buf.error, {
+        status: 502,
+        headers: corsHeaders(origin),
+      });
     }
 
+    const upstreamCt = res.headers.get('Content-Type') ?? 'application/octet-stream';
     const headers: Record<string, string> = {
       ...corsHeaders(origin),
-      'Content-Type': res.headers.get('Content-Type') ?? 'application/octet-stream',
+      'Content-Type': upstreamCt,
       'X-Final-URL': finalUrl,
       'Cache-Control': 'no-store',
     };
