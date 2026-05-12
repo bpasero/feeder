@@ -231,6 +231,66 @@ describe('parseFeed — JSON Feed', () => {
   });
 });
 
+// ---------- HTML entity decoding (CDATA workaround) ----------
+
+describe('parseFeed — HTML entity decoding', () => {
+  it('decodes numeric character references in RSS titles wrapped in CDATA', () => {
+    const rss = `<?xml version="1.0"?><rss version="2.0"><channel>
+      <title><![CDATA[The Verge]]></title>
+      <item>
+        <title><![CDATA[Palantir&#8217;s true believers are wearing this jacket]]></title>
+        <link>https://example.com/p</link>
+        <description><![CDATA[In late April, Palantir&#8217;s defense...]]></description>
+      </item>
+    </channel></rss>`;
+    const feed = parseFeed(rss, 'application/rss+xml');
+    expect(feed.items[0]!.title).toBe('Palantir’s true believers are wearing this jacket');
+  });
+
+  it('decodes named entities in RSS feed titles', () => {
+    const rss = `<?xml version="1.0"?><rss version="2.0"><channel>
+      <title><![CDATA[News &amp; Notes]]></title>
+      <description><![CDATA[Tips &amp; tricks]]></description>
+      <item><title>x</title></item>
+    </channel></rss>`;
+    const feed = parseFeed(rss, 'application/rss+xml');
+    expect(feed.title).toBe('News & Notes');
+    expect(feed.description).toBe('Tips & tricks');
+  });
+
+  it('decodes numeric entities in Atom titles wrapped in CDATA', () => {
+    const atom = `<?xml version="1.0"?>
+      <feed xmlns="http://www.w3.org/2005/Atom">
+        <title>x</title>
+        <entry>
+          <title><![CDATA[It&#8217;s here]]></title>
+          <id>id1</id>
+        </entry>
+      </feed>`;
+    const feed = parseFeed(atom, 'application/atom+xml');
+    expect(feed.items[0]!.title).toBe('It’s here');
+  });
+
+  it('preserves literal < and > in titles (no tag parsing)', () => {
+    const rss = `<?xml version="1.0"?><rss version="2.0"><channel>
+      <title>x</title>
+      <item><title><![CDATA[5 < 10 and 11 > 10]]></title></item>
+    </channel></rss>`;
+    const feed = parseFeed(rss, 'application/rss+xml');
+    expect(feed.items[0]!.title).toBe('5 < 10 and 11 > 10');
+  });
+
+  it('leaves strings without entities untouched', () => {
+    const rss = `<?xml version="1.0"?><rss version="2.0"><channel>
+      <title>Plain Title</title>
+      <item><title>No entities here</title></item>
+    </channel></rss>`;
+    const feed = parseFeed(rss, 'application/rss+xml');
+    expect(feed.title).toBe('Plain Title');
+    expect(feed.items[0]!.title).toBe('No entities here');
+  });
+});
+
 // ---------- Error handling ----------
 
 describe('parseFeed — errors', () => {

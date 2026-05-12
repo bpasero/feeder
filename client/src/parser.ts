@@ -21,6 +21,25 @@ function text(el: Element | null | undefined): string | null {
   return t ? t : null;
 }
 
+// Many feeds wrap titles/descriptions in CDATA with HTML entities inside
+// (e.g. `<title><![CDATA[Palantir&#8217;s ...]]></title>`). CDATA suppresses
+// XML entity decoding, so `&#8217;` survives as literal text. Decode it as
+// HTML so the right single-quote (and friends) render correctly.
+function decodeHtmlEntities(s: string | null): string | null {
+  if (s === null) return null;
+  if (!s.includes('&')) return s;
+  // <textarea> has a raw-text content model: setting innerHTML decodes
+  // character references but does NOT parse tags, so a literal `<` in a
+  // title (e.g. "5 < 10") is preserved verbatim.
+  const ta = document.createElement('textarea');
+  ta.innerHTML = s;
+  return ta.value;
+}
+
+function plain(el: Element | null | undefined): string | null {
+  return decodeHtmlEntities(text(el));
+}
+
 function firstChild(parent: Element, ...names: string[]): Element | null {
   for (const name of names) {
     for (const child of Array.from(parent.children)) {
@@ -46,11 +65,11 @@ function parseRss(channel: Element): ParsedFeed {
     const link = text(firstChild(it, 'link'));
     const contentEncoded = text(firstChild(it, 'encoded')); // content:encoded
     const description = text(firstChild(it, 'description'));
-    const author = text(firstChild(it, 'creator')) ?? text(firstChild(it, 'author'));
+    const author = plain(firstChild(it, 'creator')) ?? plain(firstChild(it, 'author'));
     const pub = text(firstChild(it, 'pubDate')) ?? text(firstChild(it, 'date'));
     return {
       guid,
-      title: text(firstChild(it, 'title')),
+      title: plain(firstChild(it, 'title')),
       url: link,
       author,
       content: contentEncoded ?? description,
@@ -59,9 +78,9 @@ function parseRss(channel: Element): ParsedFeed {
     };
   });
   return {
-    title: text(firstChild(channel, 'title')),
+    title: plain(firstChild(channel, 'title')),
     siteUrl: text(firstChild(channel, 'link')),
-    description: text(firstChild(channel, 'description')),
+    description: plain(firstChild(channel, 'description')),
     items,
   };
 }
@@ -87,11 +106,11 @@ function parseAtom(feed: Element): ParsedFeed {
     const guid = id ?? link ?? text(firstChild(entry, 'title')) ?? '';
     const summary = text(firstChild(entry, 'summary'));
     const content = text(firstChild(entry, 'content'));
-    const author = text(firstChild(firstChild(entry, 'author') ?? entry, 'name'));
+    const author = plain(firstChild(firstChild(entry, 'author') ?? entry, 'name'));
     const pub = text(firstChild(entry, 'published')) ?? text(firstChild(entry, 'updated'));
     return {
       guid,
-      title: text(firstChild(entry, 'title')),
+      title: plain(firstChild(entry, 'title')),
       url: link,
       author,
       content: content ?? summary,
@@ -100,9 +119,9 @@ function parseAtom(feed: Element): ParsedFeed {
     };
   });
   return {
-    title: text(firstChild(feed, 'title')),
+    title: plain(firstChild(feed, 'title')),
     siteUrl: atomLink(feed),
-    description: text(firstChild(feed, 'subtitle')),
+    description: plain(firstChild(feed, 'subtitle')),
     items,
   };
 }
