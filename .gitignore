@@ -5,4 +5,7 @@ dist
 .env
 .env.local
 .wrangler
-.claude
+.claude/playwright/node_modules/
+.claude/playwright/package-lock.json
+.claude/settings.local.json
+.claude/worktrees/
